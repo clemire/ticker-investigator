@@ -184,6 +184,61 @@ python chat_cli.py --ticker AAPL
 
 You can optionally specify start and end dates, as well as many other parameters. The app will default to a 4 month period ending today. Run `python chat_cli.py` to see a full list of params.
 
+## Example client output
+
+```
+Commands: :quit — exit | :reload — refetch dataset | :list — all major moves | :list N — articles for move #N (same order as :list) | :help — commands
+
+ask> :list
+
+Major price movements for GOOG (2026-01-20 to 2026-04-20), 14 day(s) at or above threshold:
+
+1. **2026-03-31**: Close at $286.86, pct change +5.02%
+2. **2026-02-20**: Close at $314.68, pct change +3.74%
+3. **2026-04-14**: Close at $330.58, pct change +3.56%
+4. **2026-04-08**: Close at $314.74, pct change +3.56%
+5. **2026-03-24**: Close at $289.20, pct change -3.28%
+6. **2026-03-26**: Close at $280.74, pct change -3.06%
+7. **2026-04-01**: Close at $294.90, pct change +2.80%
+8. **2026-03-09**: Close at $306.01, pct change +2.66%
+9. **2026-03-27**: Close at $273.76, pct change -2.49%
+10. **2026-02-06**: Close at $322.87, pct change -2.48%
+11. **2026-02-11**: Close at $311.11, pct change -2.29%
+12. **2026-03-20**: Close at $298.79, pct change -2.27%
+13. **2026-02-04**: Close at $333.11, pct change -2.16%
+14. **2026-04-07**: Close at $303.93, pct change +2.11%
+
+ask> :list 1
+
+**Movement 1** (GOOG) — **2026-03-31** — close $286.86, pct change +5.02%
+
+Articles (7):
+
+1. **Alphabet Inc. Class C Stock: Core Business Drivers, Investor ...**
+   - **Category**: company | **Source**: Exa AI | **Published**: 2026-04-01T00:00:00Z
+   - https://www.ad-hoc-news.de/boerse/ueberblick/alphabet-inc-class-c-stock-core-business-drivers-investor-relevance/69047846
+2. **Alphabet Shares Climb as Analysts Affirm Long-Term Buy… - Inkl**
+   - **Category**: company | **Source**: Exa AI | **Published**: 2026-03-31T00:00:00Z
+   - https://www.inkl.com/news/alphabet-shares-climb-as-analysts-affirm-long-term-buy-on-ai-momentum-and-cloud-surge
+3. **Alphabet's Solution Is A Gift For Micron's Memory Sales (NASDAQ:MU)**
+   - **Category**: competitor | **Source**: Exa AI | **Published**: 2026-03-30T00:00:00Z
+   - https://seekingalpha.com/article/4887033-alphabets-solution-is-a-gift-for-microns-memory-sales
+4. **Shares of Alphabet fell to their lowest level since late 2025, dropping ...**
+   - **Category**: company | **Source**: Exa AI | **Published**: 2026-03-31T00:00:00Z
+   - https://www.facebook.com/headingsus/posts/shares-of-alphabet-fell-to-their-lowest-level-since-late-2025-dropping-sharply-e/936981202663575/
+5. **how have the themes discussed in Google's earnings calls changed ...**
+   - **Category**: company | **Source**: Exa AI | **Published**: 2026-03-30T00:00:00Z
+   - https://www.factiq.com/share/d5ec9046e9b947259be00cdcfba60b80
+6. **E-Commerce Sector Update – April 2026 - Capstone Partners**
+   - **Category**: industry | **Source**: Exa AI | **Published**: 2026-04-01T00:00:00Z
+   - https://www.capstonepartners.com/insights/article-e-commerce-sector-update/
+7. **Meta faces regulatory risks but Jefferies sees buying opportunity**
+   - **Category**: competitor | **Source**: Exa AI | **Published**: 2026-03-30T00:00:00Z
+   - https://finance.yahoo.com/markets/stocks/articles/meta-faces-regulatory-risks-jefferie-193100680.html
+
+ask> ...
+```
+
 # Comments
 
 ## Am I happy with my solution?
