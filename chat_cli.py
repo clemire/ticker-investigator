@@ -276,8 +276,33 @@ def llm_chat_completion(
         raise RuntimeError(f"Unexpected LLM response shape: {data}") from exc
 
 
+def format_major_movements_list(dataset: dict[str, Any]) -> str:
+    """All major moves from the API payload, sorted by |pct_change| descending."""
+    major = dataset.get("major_movements", [])
+    if not major:
+        return "No major movements in the loaded dataset."
+    ordered = sorted(major, key=lambda m: abs(m["stock_day"]["pct_change"]), reverse=True)
+    lines: list[str] = []
+    for i, m in enumerate(ordered, start=1):
+        d = m["stock_day"]
+        date_s = d["date"]
+        lines.append(
+            f"{i}. **{date_s}**: Close at ${float(d['close']):.2f}, pct change {float(d['pct_change']):+.2f}%"
+        )
+    ticker = dataset.get("ticker", "")
+    start_d = dataset.get("start_date")
+    end_d = dataset.get("end_date")
+    head = (
+        f"Major price movements for {ticker} ({start_d} to {end_d}), "
+        f"{len(ordered)} day(s) at or above threshold:\n\n"
+    )
+    return head + "\n".join(lines)
+
+
 def print_help() -> None:
-    print("Commands: :quit to exit, :reload to refresh ticker dataset from API, :help for commands")
+    print(
+        "Commands: :quit — exit | :reload — refetch dataset from API | :list — all major price movements | :help — commands"
+    )
 
 
 def main() -> int:
@@ -314,6 +339,9 @@ def main() -> int:
             return 0
         if user_input == ":help":
             print_help()
+            continue
+        if user_input == ":list":
+            print(f"\n{format_major_movements_list(dataset)}")
             continue
         if user_input == ":reload":
             try:

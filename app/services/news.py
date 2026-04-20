@@ -280,6 +280,60 @@ def _dedupe_articles(articles: list[NewsArticle]) -> list[NewsArticle]:
     return deduped
 
 
+def _yfinance_stream_item_parse(
+    item: dict,
+) -> tuple[str, str, str | None, datetime | None, str] | None:
+    """Map a Yahoo tickerStream row to (title, url, summary, published_at, source).
+
+    Yahoo has returned flat fields; newer responses nest story data under ``content``
+    (title, pubDate ISO string, canonicalUrl.url, provider.displayName).
+    """
+    c = item.get("content") if isinstance(item.get("content"), dict) else {}
+
+    title = (item.get("title") or c.get("title") or "").strip()
+    summary = item.get("summary")
+    if summary is None:
+        summary = c.get("summary") or c.get("description")
+    if isinstance(summary, str):
+        summary = summary.strip() or None
+
+    url = item.get("link") or item.get("url")
+    if not url:
+        for key in ("canonicalUrl", "clickThroughUrl"):
+            block = c.get(key)
+            if isinstance(block, dict):
+                u = block.get("url")
+                if u:
+                    url = u
+                    break
+    if not url and isinstance(c.get("canonicalUrl"), str):
+        url = c["canonicalUrl"]
+
+    published_at: datetime | None = None
+    pub_ts = item.get("providerPublishTime")
+    if pub_ts is not None:
+        try:
+            published_at = datetime.fromtimestamp(int(pub_ts), tz=timezone.utc)
+        except (OSError, ValueError, OverflowError, TypeError):
+            published_at = None
+    if published_at is None:
+        for key in ("pubDate", "displayTime"):
+            raw = c.get(key) or item.get(key)
+            if isinstance(raw, str) and raw.strip():
+                published_at = _ensure_utc(_to_datetime(raw.strip()))
+                if published_at:
+                    break
+
+    src = str(item.get("publisher") or "").strip()
+    if not src and isinstance(c.get("provider"), dict):
+        src = str(c["provider"].get("displayName") or "").strip()
+    source = src or "yfinance"
+
+    if not title or not url:
+        return None
+    return (title, str(url), summary, published_at, source)
+
+
 def fetch_company_news_yfinance(ticker: str, start_date: date, end_date: date, limit: int) -> list[NewsArticle]:
     logger.info("fetch_company_news_yfinance ticker=%s start_date=%s end_date=%s limit=%s", ticker, start_date, end_date, limit)
     t = yf.Ticker(ticker)
@@ -294,22 +348,20 @@ def fetch_company_news_yfinance(ticker: str, start_date: date, end_date: date, l
     articles: list[NewsArticle] = []
     logger.info("yfinance news ticker=%s raw_items=%s (window %s..%s, limit=%s)", ticker, len(raw_news), start_date, end_date, limit)
     for item in raw_news:
-        pub_dt = item.get("providerPublishTime")
-        published_at = datetime.fromtimestamp(pub_dt, tz=timezone.utc) if pub_dt else None
+        if not isinstance(item, dict):
+            continue
+        parsed = _yfinance_stream_item_parse(item)
+        if not parsed:
+            continue
+        title, url, summary, published_at, source = parsed
         if published_at and not (start_dt <= published_at < end_dt):
             continue
 
-        title = item.get("title")
-        url = item.get("link")
-        if not title or not url:
-            continue
-
-        summary = item.get("summary")
         category = _classify_article(f"{title}\n{summary or ''}", ticker, info)
         articles.append(
             NewsArticle(
                 title=title,
-                source=str(item.get("publisher") or "yfinance"),
+                source=source,
                 published_at=published_at,
                 url=url,
                 description=summary,
