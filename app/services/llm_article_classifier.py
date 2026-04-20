@@ -16,7 +16,7 @@ from app.models import NewsArticle
 
 logger = logging.getLogger(__name__)
 
-Category = Literal["company", "industry", "macro", "unknown"]
+Category = Literal["company", "competitor", "industry", "macro", "unknown"]
 
 _CACHE: dict[str, Category] = {}
 _CACHE_MAX = 2000
@@ -53,6 +53,7 @@ def _system_prompt() -> str:
         "firm-specific stock moves, analyst price targets on this name, OR pages clearly centered on this ticker "
         "(e.g. title contains the company name and/or ticker like 'Apple (AAPL)', stock analysis, financial data for this symbol). "
         "Those are company, not unknown.\n"
+        "- competitor: the headline clearly centers on a named peer/rival of the issuer (another company or its ticker), not primarily the issuer itself—e.g. earnings, stock move, or major news about that peer when the research ticker is different.\n"
         "- industry: sector/peers/competition/supply chain/market structure affecting a group of companies; not mainly one company’s idiosyncratic story.\n"
         "- macro: rates, inflation, Fed/policy, regulation at economy-wide level, elections, geopolitics, tariffs/sanctions when not firm-specific.\n"
         "- unknown: only when the subject company/ticker cannot be determined or the text is too vague—do not use unknown when the title names the issuer or ticker."
@@ -76,6 +77,9 @@ def reconcile_llm_unknown_with_keyword_company(
         if kw == "company":
             _cache_put(_cache_key(ticker, art), "company")
             out.append(art.model_copy(update={"category": "company"}))
+        elif kw == "competitor":
+            _cache_put(_cache_key(ticker, art), "competitor")
+            out.append(art.model_copy(update={"category": "competitor"}))
         else:
             out.append(art)
     return out
@@ -91,7 +95,7 @@ def _user_payload_chunk(
         f"Issuer / company context: {company_label or '(not provided)'}",
         "",
         "Classify each article below. Return JSON exactly in this shape:",
-        '{"results":[{"index":0,"category":"company|industry|macro|unknown"}, ...]}',
+        '{"results":[{"index":0,"category":"company|competitor|industry|macro|unknown"}, ...]}',
         "Indices are 0-based within this batch only.",
         "",
         "Articles:",
@@ -173,7 +177,7 @@ def _classify_chunk(
     results = parsed.get("results")
     if not isinstance(results, list):
         return {}
-    allowed: set[str] = {"company", "industry", "macro", "unknown"}
+    allowed: set[str] = {"company", "competitor", "industry", "macro", "unknown"}
     for row in results:
         if not isinstance(row, dict):
             continue

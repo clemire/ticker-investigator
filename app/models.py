@@ -24,7 +24,7 @@ class NewsArticle(BaseModel):
     published_at: datetime | None = None
     url: str
     description: str | None = None
-    category: Literal["company", "industry", "macro", "unknown"] = "unknown"
+    category: Literal["company", "competitor", "industry", "macro", "unknown"] = "unknown"
     relevance_score: float = Field(0.0, ge=0.0, le=1.0, description="Post-fetch relevance to the ticker (0..1).")
 
 

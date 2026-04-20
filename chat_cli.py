@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -147,9 +148,9 @@ def compact_dataset(dataset: dict[str, Any]) -> dict[str, Any]:
                 "news": [
                     {
                         "title": article.get("title"),
+                        "category": article.get("category"),
                         "source": article.get("source"),
                         "published_at": article.get("published_at"),
-                        "category": article.get("category"),
                         "relevance_score": article.get("relevance_score"),
                         "url": article.get("url"),
                     }
@@ -171,13 +172,25 @@ def compact_dataset(dataset: dict[str, Any]) -> dict[str, Any]:
 
 def build_system_prompt(dataset_context: dict[str, Any]) -> str:
     context_json = json.dumps(dataset_context, ensure_ascii=True)
+    n = int(dataset_context.get("num_major_movements") or 0)
+    count_rule = (
+        f"The field num_major_movements is {n}. The major_movements array contains exactly {n} items. "
+        f"If you output a numbered list of major movements (or a section titled Major Movements), "
+        f"you MUST print exactly {n} entries—never fewer. Include smaller-magnitude days at the end; do not stop early.\n"
+    )
+    article_rule = (
+        "Whenever you list or summarize news articles from major_movements[].news[], include each article's "
+        "**category** (company, competitor, industry, macro, or unknown) for every item—e.g. title + category + source, "
+        "or a bullet line that names the category explicitly. Do not omit category when articles are shown.\n"
+    )
     return (
         "You are a stock movement investigation assistant. "
         "Answer questions only from the provided ticker dataset context. "
         "If information is missing, say what is missing and ask for a refresh with broader filters. "
-        "Be concise but analytical. Quote dates, percentages, and relevant headlines when possible. "
-        "When listing major price movements, include every entry in major_movements exactly once "
-        "(len(major_movements) must equal num_major_movements); do not omit the smallest moves.\n\n"
+        "Be concise but analytical. Quote dates, percentages, and relevant headlines when possible.\n"
+        + article_rule
+        + count_rule
+        + "\n"
         f"Ticker dataset context JSON:\n{context_json}"
     )
 
@@ -185,8 +198,6 @@ def build_system_prompt(dataset_context: dict[str, Any]) -> str:
 def wants_full_movement_enumeration(question: str) -> bool:
     """Catalogue-style questions where we must list every move (LLMs often drop one otherwise)."""
     ql = question.lower()
-    if "movement" not in ql and "moves" not in ql:
-        return False
     if any(
         x in ql
         for x in (
@@ -198,6 +209,11 @@ def wants_full_movement_enumeration(question: str) -> bool:
             "cause of",
         )
     ):
+        return False
+    # "major move" / "major moves" without requiring the word "movements"
+    if re.search(r"\bmajor\s+moves?\b", ql):
+        return True
+    if "movement" not in ql and "moves" not in ql:
         return False
     catalogue = (
         "all major",
@@ -227,10 +243,9 @@ def wants_full_movement_enumeration(question: str) -> bool:
 
 def format_major_movements_answer(dataset: dict[str, Any]) -> str:
     """Deterministic full list: same ordering as compact_dataset (|pct_change| desc)."""
-    major = dataset.get("major_movements", [])
-    if not major:
+    ordered = _ordered_major_movements(dataset)
+    if not ordered:
         return "No major movements in this dataset."
-    ordered = sorted(major, key=lambda m: abs(m["stock_day"]["pct_change"]), reverse=True)
     lines: list[str] = []
     for i, m in enumerate(ordered, start=1):
         d = m["stock_day"]
@@ -276,12 +291,71 @@ def llm_chat_completion(
         raise RuntimeError(f"Unexpected LLM response shape: {data}") from exc
 
 
+def llm_chat_completion_with_spinner(
+    *,
+    llm_base_url: str,
+    model: str,
+    api_key: str,
+    messages: list[dict[str, str]],
+    timeout: float,
+) -> str:
+    """Call the chat API; show a stderr spinner on TTY while waiting."""
+    if not sys.stderr.isatty():
+        return llm_chat_completion(
+            llm_base_url=llm_base_url,
+            model=model,
+            api_key=api_key,
+            messages=messages,
+            timeout=timeout,
+        )
+
+    result: str | None = None
+    error: Exception | None = None
+
+    def worker() -> None:
+        nonlocal result, error
+        try:
+            result = llm_chat_completion(
+                llm_base_url=llm_base_url,
+                model=model,
+                api_key=api_key,
+                messages=messages,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            error = exc
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    blurb = f"Waiting for {model}…"
+    i = 0
+    while thread.is_alive():
+        ch = frames[i % len(frames)]
+        sys.stderr.write(f"{_CLEAR_LINE}{ch} {blurb}")
+        sys.stderr.flush()
+        time.sleep(0.09)
+        i += 1
+    thread.join()
+    sys.stderr.write(_CLEAR_LINE)
+    sys.stderr.flush()
+    if error is not None:
+        raise error
+    if result is None:
+        raise RuntimeError("LLM request finished without result or error")
+    return result
+
+
+def _ordered_major_movements(dataset: dict[str, Any]) -> list[dict[str, Any]]:
+    major = dataset.get("major_movements", [])
+    return sorted(major, key=lambda m: abs(m["stock_day"]["pct_change"]), reverse=True)
+
+
 def format_major_movements_list(dataset: dict[str, Any]) -> str:
     """All major moves from the API payload, sorted by |pct_change| descending."""
-    major = dataset.get("major_movements", [])
-    if not major:
+    ordered = _ordered_major_movements(dataset)
+    if not ordered:
         return "No major movements in the loaded dataset."
-    ordered = sorted(major, key=lambda m: abs(m["stock_day"]["pct_change"]), reverse=True)
     lines: list[str] = []
     for i, m in enumerate(ordered, start=1):
         d = m["stock_day"]
@@ -299,9 +373,54 @@ def format_major_movements_list(dataset: dict[str, Any]) -> str:
     return head + "\n".join(lines)
 
 
+def format_articles_for_movement(dataset: dict[str, Any], movement_number: int) -> str:
+    """List all related_news for movement_number (1-based, same order as :list)."""
+    ordered = _ordered_major_movements(dataset)
+    if not ordered:
+        return "No major movements in the loaded dataset."
+    if movement_number < 1 or movement_number > len(ordered):
+        return (
+            f"No movement #{movement_number}: use 1–{len(ordered)} "
+            "(same numbering as :list)."
+        )
+    m = ordered[movement_number - 1]
+    d = m["stock_day"]
+    news = m.get("related_news") or []
+    date_s = d["date"]
+    ticker = dataset.get("ticker", "")
+    head = (
+        f"**Movement {movement_number}** ({ticker}) — **{date_s}** — "
+        f"close ${float(d['close']):.2f}, pct change {float(d['pct_change']):+.2f}%\n\n"
+    )
+    if not news:
+        return head + "No articles linked for this movement in the dataset."
+    lines: list[str] = [f"Articles ({len(news)}):\n"]
+    for i, art in enumerate(news, start=1):
+        title = art.get("title") or "(no title)"
+        cat = art.get("category") or "unknown"
+        src = art.get("source") or "—"
+        url = art.get("url") or ""
+        pub = art.get("published_at")
+        if pub is None:
+            pub_s = "—"
+        elif isinstance(pub, str):
+            pub_s = pub
+        else:
+            pub_s = str(pub)
+        lines.append(f"{i}. **{title}**")
+        lines.append(
+            f"   - **Category**: {cat} | **Source**: {src} | **Published**: {pub_s}"
+        )
+        if url:
+            lines.append(f"   - {url}")
+    return head + "\n".join(lines)
+
+
 def print_help() -> None:
     print(
-        "Commands: :quit — exit | :reload — refetch dataset from API | :list — all major price movements | :help — commands"
+        "Commands: :quit — exit | :reload — refetch dataset | "
+        ":list — all major moves | :list N — articles for move #N (same order as :list) | "
+        ":help — commands"
     )
 
 
@@ -340,8 +459,18 @@ def main() -> int:
         if user_input == ":help":
             print_help()
             continue
-        if user_input == ":list":
-            print(f"\n{format_major_movements_list(dataset)}")
+        if user_input.startswith(":list"):
+            parts = user_input.split()
+            if len(parts) == 1:
+                print(f"\n{format_major_movements_list(dataset)}")
+                continue
+            if len(parts) == 2 and parts[1].isdigit():
+                print(f"\n{format_articles_for_movement(dataset, int(parts[1]))}")
+                continue
+            print(
+                "Usage: :list  (all major movements)  |  :list N  (articles for movement N)",
+                file=sys.stderr,
+            )
             continue
         if user_input == ":reload":
             try:
@@ -366,7 +495,7 @@ def main() -> int:
 
         messages.append({"role": "user", "content": user_input})
         try:
-            answer = llm_chat_completion(
+            answer = llm_chat_completion_with_spinner(
                 llm_base_url=args.llm_base_url,
                 model=args.llm_model,
                 api_key=api_key,

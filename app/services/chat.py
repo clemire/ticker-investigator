@@ -55,10 +55,11 @@ def answer_question(question: str, data: StockNewsResponse) -> ChatResponse:
             )
         return ChatResponse(answer=answer, highlights=highlights)
 
-    if any(term in q for term in ("macro", "industry", "company", "category", "theme")):
+    if any(term in q for term in ("macro", "industry", "company", "competitor", "category", "theme")):
         counts = _categorize_counts(data)
         answer = (
             f"News mix for major-move windows: company={counts.get('company', 0)}, "
+            f"competitor={counts.get('competitor', 0)}, "
             f"industry={counts.get('industry', 0)}, macro={counts.get('macro', 0)}, "
             f"unknown={counts.get('unknown', 0)}."
         )

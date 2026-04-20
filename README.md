@@ -80,21 +80,106 @@ Rule-based Q&A over the **same** stock+news payload built for the given ticker a
 
 Liveness check.
 
-## Terminal LLM chat (`chat_cli.py`)
+## CLI client (`chat_cli.py`)
 
-Uses an **OpenAI-compatible** chat API to answer questions against the JSON from `GET /api/v1/stock-news` (your API must be running).
+Interactive terminal client: it loads **`GET /api/v1/stock-news`** from your running API, builds a compact context for the model, and sends your questions to an **OpenAI-compatible** chat endpoint (`/v1/chat/completions`).
+
+### Prerequisites
+
+1. **Ticker Investigator API** is running (see [Quick start](#quick-start)), default `http://127.0.0.1:8000`.
+2. **`OPENAI_API_KEY`** (or the env name you pass with `--llm-api-key-env`) is set for the LLM call.
+
+### Start the client
 
 ```bash
-export OPENAI_API_KEY=...   # or set in .env
+# Terminal 1 — API
+uvicorn app.main:app --reload
+
+# Terminal 2 — CLI (key from .env or export)
 python chat_cli.py --ticker AAPL
 ```
 
-Common flags: `--start-date`, `--end-date`, `--threshold-pct`, `--movement-type`, `--news-limit`, `--api-base-url`, `--llm-model`, `--llm-base-url`, `--timeout`, `--api-retries`.
+Narrow the window or tune news volume:
 
-In the REPL: `:reload` refetches data; `:quit` exits. A short loading line appears on stderr while the dataset loads.
+```bash
+python chat_cli.py --ticker MSFT \
+  --start-date 2025-01-01 --end-date 2025-03-31 \
+  --threshold-pct 2.5 --news-limit 15
+```
+
+Point at another API host or model:
+
+```bash
+python chat_cli.py --ticker NVDA \
+  --api-base-url http://127.0.0.1:8000 \
+  --llm-base-url https://api.openai.com/v1 \
+  --llm-model gpt-4o-mini
+```
+
+Useful **flags** (see `python chat_cli.py --help` for all): `--start-date`, `--end-date`, `--threshold-pct`, `--movement-type` (`up` | `down` | `all`), `--news-limit`, `--api-base-url`, `--llm-base-url`, `--llm-model`, `--timeout`, `--api-retries`.
+
+While the initial dataset loads, a short **spinner** line is written to **stderr** (TTY only).
+
+### REPL commands
+
+These are handled locally (no LLM call):
+
+| Command | Action |
+|--------|--------|
+| `:help` | Show built-in commands |
+| `:quit` | Exit (also **Ctrl+D** / **Ctrl+C**) |
+| `:reload` | Refetch `stock-news` with the same CLI flags and reset chat history |
+| `:list` | Print every **major price movement**, numbered **1…N** in order of **largest \|% change\|** first |
+| `:list N` | Print **all related articles** for movement **#N** (same numbering as `:list`), with title, category, source, published time, and URL |
+
+Example session:
+
+```text
+ask> :list
+→ prints every major-move day, numbered 1…N (largest |% change| first)
+
+ask> :list 1
+→ prints all linked articles for movement #1 (title, category, source, URL, …)
+
+ask> What themes show up in the news on the biggest down days?
+→ model answer using only the loaded dataset
+
+ask> :reload
+→ refetches stock/news; chat history resets to a fresh system prompt
+
+ask> :quit
+```
+
+Natural-language questions use the loaded dataset only; the model does not browse the web.
+
+### Environment
+
+The CLI reads **`OPENAI_API_KEY`** from the environment (default; override with `--llm-api-key-env`). If you use a **`.env`** file for the API process, export the same variables in the shell that runs `chat_cli.py`, or load them with your shell or a tool like `direnv`.
 
 ## Notes
 
 - **Relevance** blends direct ticker/company overlap with industry/macro keyword matches (aligned with classification). Tune `NEWS_RELEVANCE_THRESHOLD` if you see too many drops or too much noise (raising it above ~0.45 can drop thematic-only articles again).
 - **Classification** uses the LLM when enabled; otherwise the same keyword rules as before. Results are cached in-process by URL+title hash to avoid repeat API cost.
 - Price history can occasionally be empty from `yfinance`; the API retries before returning 404.
+
+# Comments
+
+## Am I happy with my solution?
+
+Not quite. I use chatgpt to support chat with the terminal client util that allows you to interact with articles. I find that it doesn’t consistently render data and sometimes omits information. I think this is not very usable. Using keywords to include industry and macro articles also seems a bit brittle and limits search results; however it does enrich the returned response.
+
+## Process
+
+I used AI to build out a FastAPI service that searches for price movements, then finds articles from supported sources in parallel using a keyword search and a timeline of +-1 day from the price movement. 
+
+We use several keyword queries for each news provider: one for the company itself, and one for each of the top 5 competitors as determined by an llm query. Articles are deduped, assigned a category (“company/industry/macro/unknown”) and given a relevance score on title+description. Articles below the relevance threshold are dropped. Once articles are dropped, the remaining articles are optionally reclassified with an llm for more accurate categories.
+
+I considered adding UX, but opted to build a text client since I needed to support a chat interface anyway, and also because I’m a backend engineer and didn’t want to get bogged down in UI bugs. 
+
+## What would I do differently?
+
+I think I would spend more time thinking about how to surface articles that are relevant to the macro category. I would also tighten the client interface by specifying in a prompt how I want results to render, for the sake of consistency and discoverability of data.
+
+## Did I get stuck anywhere?
+
+I got a little caught up in why yfinance wasn’t returning articles, and whether not getting (many) articles back was due to a bug in my code or because my api keys had run out of capacity. Thankfully my exa key renewed after a few minutes and I was able to roughly validate how I process articles and confirm categories were sane. If exa hadn’t renewed capacity, I would have needed a different news source.

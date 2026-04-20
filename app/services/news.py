@@ -4,6 +4,7 @@ from email.utils import parsedate_to_datetime
 import logging
 import os
 import re
+from typing import Any
 from xml.etree import ElementTree
 
 import httpx
@@ -71,6 +72,204 @@ def _build_company_terms(ticker: str, info: dict | None) -> list[str]:
     return sorted(terms)
 
 
+# --- Keyword search query (NewsAPI / GNews / Exa / Jina): ticker + company names + competitors ---
+
+_TICKER_SYMBOL_RE = re.compile(r"^[A-Z]{1,5}(?:\.[A-Z])?$")
+_COMPETITOR_LABEL_CACHE: dict[str, list[str]] = {}
+_COMPETITOR_LABEL_CACHE_MAX = 200
+
+
+def _canonical_company_strings_from_info(info: dict | None) -> list[str]:
+    """Human-readable issuer names from yfinance ``info`` (short / long / display)."""
+    if not info:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for key in ("shortName", "longName", "displayName"):
+        v = info.get(key)
+        if not isinstance(v, str):
+            continue
+        s = " ".join(v.split()).strip()
+        if len(s) < 2:
+            continue
+        low = s.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        out.append(s)
+    return out
+
+
+def _issuer_search_entity_terms(ticker: str, info: dict | None) -> list[str]:
+    """Primary symbol plus company names for keyword news search."""
+    sym = ticker.strip()
+    if not sym:
+        return []
+    terms: list[str] = [sym]
+    seen = {sym.lower()}
+    for s in _canonical_company_strings_from_info(info):
+        low = s.lower()
+        if low not in seen:
+            seen.add(low)
+            terms.append(s)
+    return terms
+
+
+def _is_probable_equity_ticker_token(s: str) -> bool:
+    x = s.strip().upper()
+    return bool(x and _TICKER_SYMBOL_RE.match(x))
+
+
+def _expand_competitor_search_term(label: str) -> list[str]:
+    """Keep label as-is, or add company names from yfinance when label looks like a ticker."""
+    raw = label.strip()
+    if not raw:
+        return []
+    if not _is_probable_equity_ticker_token(raw):
+        return [raw]
+    key = raw.upper()
+    if key in _COMPETITOR_LABEL_CACHE:
+        return _COMPETITOR_LABEL_CACHE[key]
+    labels = [key]
+    try:
+        t = yf.Ticker(key)
+        inf = t.info if isinstance(t.info, dict) else {}
+    except Exception:
+        inf = {}
+    seen = {x.lower() for x in labels}
+    for s in _canonical_company_strings_from_info(inf):
+        low = s.lower()
+        if low not in seen:
+            seen.add(low)
+            labels.append(s)
+    if len(_COMPETITOR_LABEL_CACHE) >= _COMPETITOR_LABEL_CACHE_MAX:
+        _COMPETITOR_LABEL_CACHE.clear()
+    _COMPETITOR_LABEL_CACHE[key] = labels
+    return labels
+
+
+def _competitor_match_terms_for_classification(
+    ticker: str,
+    info: dict | None,
+    raw_competitors: list[str],
+) -> list[str]:
+    """Labels for peer companies only (symbol + names), excluding the primary issuer—used to tag titles mentioning a competitor."""
+    issuer_lower = {x.lower() for x in _issuer_search_entity_terms(ticker, info)}
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add_term(term: str) -> None:
+        t = term.strip()
+        low = t.lower()
+        if len(low) < 2 or low in issuer_lower:
+            return
+        if low in seen:
+            return
+        seen.add(low)
+        out.append(t)
+
+    for raw in raw_competitors:
+        for term in _expand_competitor_search_term(raw):
+            add_term(term)
+            # Headlines often use "Microsoft" not "Microsoft Corporation"
+            parts = term.replace(",", " ").split()
+            if len(parts) > 1:
+                head = parts[0].strip()
+                if len(head) >= 3 and head.lower() not in _COMPANY_STOPWORDS:
+                    add_term(head)
+    return out
+
+
+def _title_matches_competitor_term(title: str, term: str) -> bool:
+    """True if ``term`` appears in ``title`` (substring for long names; word-boundary for short tokens)."""
+    if not title or not term:
+        return False
+    t = term.strip()
+    if len(t) < 2:
+        return False
+    tl = title.lower()
+    low = t.lower()
+    if len(low) <= 4:
+        return re.search(rf"\b{re.escape(low)}\b", tl) is not None
+    return low in tl
+
+
+def _ensure_competitor_category_from_title(
+    title: str,
+    competitor_terms: list[str] | None,
+    current: str,
+) -> str:
+    if not competitor_terms:
+        return current
+    for term in competitor_terms:
+        if _title_matches_competitor_term(title, term):
+            return "competitor"
+    return current
+
+
+_QUERY_TAIL = ["stock", "earnings", "industry", "macroeconomy", "regulation", "tariff"]
+
+
+def _issuer_only_keyword_query(ticker: str, info: dict | None) -> str:
+    """Single feed query for the primary ticker (symbol + display names) + context tail."""
+    seen: set[str] = set()
+    parts: list[str] = []
+
+    def add(term: str) -> None:
+        t = term.strip()
+        if len(t) < 1:
+            return
+        low = t.lower()
+        if low in seen:
+            return
+        seen.add(low)
+        parts.append(t)
+
+    for x in _issuer_search_entity_terms(ticker, info):
+        add(x)
+    return " ".join(parts + _QUERY_TAIL)
+
+
+def _keyword_query_for_single_competitor(competitor_raw: str) -> str | None:
+    """One feed query per LLM competitor: that peer's symbol/names + context tail (not merged with issuer)."""
+    raw = competitor_raw.strip()
+    if not raw:
+        return None
+    terms = _expand_competitor_search_term(raw)
+    if not terms:
+        return None
+    seen: set[str] = set()
+    parts: list[str] = []
+    for t in terms:
+        s = t.strip()
+        if len(s) < 1:
+            continue
+        low = s.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        parts.append(s)
+    return " ".join(parts + _QUERY_TAIL)
+
+
+def _all_keyword_search_queries(ticker: str, info: dict | None, competitors: list[str]) -> list[str]:
+    """Issuer query first, then one distinct query per competitor (separate newsfeed searches)."""
+    out: list[str] = []
+    seen_lower: set[str] = set()
+    base = _issuer_only_keyword_query(ticker, info)
+    out.append(base)
+    seen_lower.add(base.lower())
+    for raw in competitors:
+        q = _keyword_query_for_single_competitor(raw)
+        if not q:
+            continue
+        if q.lower() in seen_lower:
+            continue
+        seen_lower.add(q.lower())
+        out.append(q)
+    return out
+
+
 def _to_datetime(value: object) -> datetime | None:
     if value is None:
         return None
@@ -133,7 +332,18 @@ def _in_date_range(published_at: datetime | None, start_date: date, end_date: da
     return start_dt <= _ensure_utc(published_at) < end_dt
 
 
-def _classify_article(text: str, ticker: str, info: dict | None = None) -> str:
+def _classify_article(
+    text: str,
+    ticker: str,
+    info: dict | None = None,
+    *,
+    competitor_terms: list[str] | None = None,
+) -> str:
+    title_line = text.split("\n", 1)[0]
+    if competitor_terms:
+        for term in competitor_terms:
+            if _title_matches_competitor_term(title_line, term):
+                return "competitor"
     lower = text.lower()
     company_terms = _build_company_terms(ticker, info)
     if any(term and term in lower for term in company_terms):
@@ -194,6 +404,7 @@ def _finalize_news_with_relevance(
     *,
     min_score: float,
     limit: int,
+    competitor_terms: list[str] | None = None,
 ) -> list[NewsArticle]:
     deduped = _dedupe_articles(articles)
     enriched: list[NewsArticle] = []
@@ -201,7 +412,8 @@ def _finalize_news_with_relevance(
         body = f"{item.title}\n{item.description or ''}"
         category = item.category
         if category == "unknown":
-            category = _classify_article(body, ticker, info)
+            category = _classify_article(body, ticker, info, competitor_terms=competitor_terms)
+        category = _ensure_competitor_category_from_title(item.title, competitor_terms, category)
         score = _compute_relevance_score(body, ticker, info)
         enriched.append(
             item.model_copy(
@@ -263,7 +475,21 @@ def _finalize_news_with_relevance(
         timeout=settings.news_llm_timeout_seconds,
         max_parallel_chunks=settings.news_llm_max_parallel_chunks,
     )
-    return reconcile_llm_unknown_with_keyword_company(sliced, ticker, info, _classify_article)
+    sliced = [
+        art.model_copy(
+            update={
+                "category": _ensure_competitor_category_from_title(
+                    art.title, competitor_terms, art.category
+                )
+            }
+        )
+        for art in sliced
+    ]
+
+    def _keyword_classify(body: str, t: str, inf: dict | None) -> str:
+        return _classify_article(body, t, inf, competitor_terms=competitor_terms)
+
+    return reconcile_llm_unknown_with_keyword_company(sliced, ticker, info, _keyword_classify)
 
 
 def _dedupe_articles(articles: list[NewsArticle]) -> list[NewsArticle]:
@@ -334,7 +560,14 @@ def _yfinance_stream_item_parse(
     return (title, str(url), summary, published_at, source)
 
 
-def fetch_company_news_yfinance(ticker: str, start_date: date, end_date: date, limit: int) -> list[NewsArticle]:
+def fetch_company_news_yfinance(
+    ticker: str,
+    start_date: date,
+    end_date: date,
+    limit: int,
+    *,
+    competitor_terms: list[str] | None = None,
+) -> list[NewsArticle]:
     logger.info("fetch_company_news_yfinance ticker=%s start_date=%s end_date=%s limit=%s", ticker, start_date, end_date, limit)
     t = yf.Ticker(ticker)
     try:
@@ -357,7 +590,12 @@ def fetch_company_news_yfinance(ticker: str, start_date: date, end_date: date, l
         if published_at and not (start_dt <= published_at < end_dt):
             continue
 
-        category = _classify_article(f"{title}\n{summary or ''}", ticker, info)
+        category = _classify_article(
+            f"{title}\n{summary or ''}",
+            ticker,
+            info,
+            competitor_terms=competitor_terms,
+        )
         articles.append(
             NewsArticle(
                 title=title,
@@ -391,6 +629,7 @@ def _parse_rss_articles(
     info: dict | None,
     start_date: date | None = None,
     end_date: date | None = None,
+    competitor_terms: list[str] | None = None,
 ) -> list[NewsArticle]:
     try:
         root = ElementTree.fromstring(rss_xml)
@@ -423,7 +662,12 @@ def _parse_rss_articles(
         if not title or not link:
             continue
 
-        category = _classify_article(f"{title}\n{description or ''}", ticker, info)
+        category = _classify_article(
+            f"{title}\n{description or ''}",
+            ticker,
+            info,
+            competitor_terms=competitor_terms,
+        )
         articles.append(
             NewsArticle(
                 title=title,
@@ -482,6 +726,7 @@ def fetch_newsapi_news(
     end_date: date,
     limit: int,
     timeout_seconds: float,
+    competitor_terms: list[str] | None = None,
 ) -> list[NewsArticle]:
     api_key = os.getenv("NEWSAPI_API_KEY")
     if not api_key:
@@ -510,7 +755,12 @@ def fetch_newsapi_news(
         if not _in_date_range(published_at, start_date, end_date):
             continue
         description = item.get("description")
-        category = _classify_article(f"{title}\n{description or ''}", ticker, info)
+        category = _classify_article(
+            f"{title}\n{description or ''}",
+            ticker,
+            info,
+            competitor_terms=competitor_terms,
+        )
         articles.append(
             NewsArticle(
                 title=title,
@@ -533,6 +783,7 @@ def fetch_gnews_news(
     end_date: date,
     limit: int,
     timeout_seconds: float,
+    competitor_terms: list[str] | None = None,
 ) -> list[NewsArticle]:
     api_key = os.getenv("GNEWS_API_KEY")
     if not api_key:
@@ -560,7 +811,12 @@ def fetch_gnews_news(
         if not _in_date_range(published_at, start_date, end_date):
             continue
         description = item.get("description")
-        category = _classify_article(f"{title}\n{description or ''}", ticker, info)
+        category = _classify_article(
+            f"{title}\n{description or ''}",
+            ticker,
+            info,
+            competitor_terms=competitor_terms,
+        )
         articles.append(
             NewsArticle(
                 title=title,
@@ -583,6 +839,7 @@ def fetch_exa_news(
     end_date: date,
     limit: int,
     timeout_seconds: float,
+    competitor_terms: list[str] | None = None,
 ) -> list[NewsArticle]:
     api_key = os.getenv("EXA_API_KEY")
     if not api_key:
@@ -616,7 +873,12 @@ def fetch_exa_news(
         if not _in_date_range(published_at, start_date, end_date):
             continue
         description = item.get("text")
-        category = _classify_article(f"{title}\n{description or ''}", ticker, info)
+        category = _classify_article(
+            f"{title}\n{description or ''}",
+            ticker,
+            info,
+            competitor_terms=competitor_terms,
+        )
         articles.append(
             NewsArticle(
                 title=title,
@@ -648,56 +910,79 @@ def fetch_relevant_news(
         ticker_info = None
 
     competitors = top_competitors_for_news_search(ticker, ticker_info)
-    base_terms = [ticker, "stock", "earnings", "industry", "macroeconomy", "regulation"]
-    general_query = " ".join(base_terms + competitors)
+    competitor_terms = _competitor_match_terms_for_classification(ticker, ticker_info, competitors)
+    queries = _all_keyword_search_queries(ticker, ticker_info, competitors)
+    nq = len(queries)
+    per_query_limit = max(10, pool_size // max(1, nq))
+    parallel_tasks = 1 + 4 * nq
+    max_workers = min(32, max(8, parallel_tasks, settings.news_fetch_parallel_workers))
+    logger.info(
+        "Keyword news queries for %s: %s separate feed(s), per-query limit=%s (pool_size=%s)",
+        ticker,
+        nq,
+        per_query_limit,
+        pool_size,
+    )
 
-    workers = max(1, min(settings.news_fetch_parallel_workers, 5))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_name: dict = {
-            pool.submit(
-                fetch_company_news_yfinance,
-                ticker,
-                start_date,
-                end_date,
-                pool_size,
-            ): "yfinance",
-            pool.submit(
-                fetch_newsapi_news,
-                general_query,
-                ticker=ticker,
-                info=ticker_info,
-                start_date=start_date,
-                end_date=end_date,
-                limit=pool_size,
-                timeout_seconds=timeout_seconds,
-            ): "newsapi",
-            pool.submit(
-                fetch_gnews_news,
-                general_query,
-                ticker=ticker,
-                info=ticker_info,
-                start_date=start_date,
-                end_date=end_date,
-                limit=pool_size,
-                timeout_seconds=timeout_seconds,
-            ): "gnews",
-            pool.submit(
-                fetch_exa_news,
-                general_query,
-                ticker=ticker,
-                info=ticker_info,
-                start_date=start_date,
-                end_date=end_date,
-                limit=pool_size,
-                timeout_seconds=timeout_seconds,
-            ): "exa",
-            pool.submit(
-                fetch_general_news_jina,
-                general_query,
-                pool_size,
-                timeout_seconds,
-            ): "jina",
-        }
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_name: dict[Any, str] = {}
+        yf_fut = pool.submit(
+            fetch_company_news_yfinance,
+            ticker,
+            start_date,
+            end_date,
+            pool_size,
+            competitor_terms=competitor_terms,
+        )
+        future_to_name[yf_fut] = "yfinance"
+        for qi, q in enumerate(queries):
+            future_to_name[
+                pool.submit(
+                    fetch_newsapi_news,
+                    q,
+                    ticker=ticker,
+                    info=ticker_info,
+                    start_date=start_date,
+                    end_date=end_date,
+                    limit=per_query_limit,
+                    timeout_seconds=timeout_seconds,
+                    competitor_terms=competitor_terms,
+                )
+            ] = f"newsapi[{qi}]"
+            future_to_name[
+                pool.submit(
+                    fetch_gnews_news,
+                    q,
+                    ticker=ticker,
+                    info=ticker_info,
+                    start_date=start_date,
+                    end_date=end_date,
+                    limit=per_query_limit,
+                    timeout_seconds=timeout_seconds,
+                    competitor_terms=competitor_terms,
+                )
+            ] = f"gnews[{qi}]"
+            future_to_name[
+                pool.submit(
+                    fetch_exa_news,
+                    q,
+                    ticker=ticker,
+                    info=ticker_info,
+                    start_date=start_date,
+                    end_date=end_date,
+                    limit=per_query_limit,
+                    timeout_seconds=timeout_seconds,
+                    competitor_terms=competitor_terms,
+                )
+            ] = f"exa[{qi}]"
+            future_to_name[
+                pool.submit(
+                    fetch_general_news_jina,
+                    q,
+                    per_query_limit,
+                    timeout_seconds,
+                )
+            ] = f"jina[{qi}]"
         for fut in as_completed(future_to_name):
             name = future_to_name[fut]
             try:
@@ -712,4 +997,5 @@ def fetch_relevant_news(
         ticker_info,
         min_score=settings.news_relevance_threshold,
         limit=limit,
+        competitor_terms=competitor_terms,
     )
