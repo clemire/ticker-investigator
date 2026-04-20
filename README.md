@@ -162,7 +162,7 @@ The CLI reads **`OPENAI_API_KEY`** from the environment (default; override with 
 - **Classification** uses the LLM when enabled; otherwise the same keyword rules as before. Results are cached in-process by URL+title hash to avoid repeat API cost.
 - Price history can occasionally be empty from `yfinance`; the API retries before returning 404.
 
-# Usage
+# Quickstart
 
 1. Start the server
 
