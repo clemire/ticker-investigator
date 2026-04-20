@@ -162,6 +162,28 @@ The CLI reads **`OPENAI_API_KEY`** from the environment (default; override with 
 - **Classification** uses the LLM when enabled; otherwise the same keyword rules as before. Results are cached in-process by URL+title hash to avoid repeat API cost.
 - Price history can occasionally be empty from `yfinance`; the API retries before returning 404.
 
+# Usage
+
+1. Start the server
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+# Edit .env: add API key for OPENAI
+# (Only OPENAI is required.)
+uvicorn app.main:app --reload
+```
+
+2. Run the cli client
+
+```bash
+python chat_cli.py --ticker AAPL
+```
+
+You can optionally specify start and end dates, as well as many other parameters. The app will default to a 4 month period ending today. Run `python chat_cli.py` to see a full list of params.
+
 # Comments
 
 ## Am I happy with my solution?
