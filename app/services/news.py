@@ -16,6 +16,7 @@ from app.services.llm_article_classifier import (
     apply_llm_categories,
     reconcile_llm_unknown_with_keyword_company,
 )
+from app.services.ticker_competitors import top_competitors_for_news_search
 
 JINA_NEWS_ENDPOINT = "https://s.jina.ai/http://news.google.com/rss/search"
 NEWSAPI_ENDPOINT = "https://newsapi.org/v2/everything"
@@ -213,6 +214,17 @@ def _finalize_news_with_relevance(
     relevant = [a for a in enriched if a.relevance_score >= min_score]
     relevant.sort(key=lambda a: (-a.relevance_score, a.title))
     dropped = len(enriched) - len(relevant)
+
+    for a in enriched:
+        if a.relevance_score < min_score:
+            logger.info(
+                "news_drop_relevance ticker=%s score=%.4f threshold=%.4f title=%r url=%s",
+                ticker,
+                a.relevance_score,
+                min_score,
+                (a.title or "")[:280],
+                a.url,
+            )
     if dropped:
         logger.info(
             "Relevance filter: dropped %s/%s articles below %.2f for %s",
@@ -229,6 +241,17 @@ def _finalize_news_with_relevance(
             ticker,
         )
     sliced = relevant[:limit]
+    if len(relevant) > limit:
+        for a in relevant[limit:]:
+            logger.info(
+                "news_drop_limit ticker=%s news_limit=%s score=%.4f title=%r url=%s",
+                ticker,
+                limit,
+                a.relevance_score,
+                (a.title or "")[:280],
+                a.url,
+            )
+
     sliced = apply_llm_categories(
         sliced,
         ticker,
@@ -258,6 +281,7 @@ def _dedupe_articles(articles: list[NewsArticle]) -> list[NewsArticle]:
 
 
 def fetch_company_news_yfinance(ticker: str, start_date: date, end_date: date, limit: int) -> list[NewsArticle]:
+    logger.info("fetch_company_news_yfinance ticker=%s start_date=%s end_date=%s limit=%s", ticker, start_date, end_date, limit)
     t = yf.Ticker(ticker)
     try:
         info = t.info if isinstance(t.info, dict) else {}
@@ -268,6 +292,7 @@ def fetch_company_news_yfinance(ticker: str, start_date: date, end_date: date, l
     end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
 
     articles: list[NewsArticle] = []
+    logger.info("yfinance news ticker=%s raw_items=%s (window %s..%s, limit=%s)", ticker, len(raw_news), start_date, end_date, limit)
     for item in raw_news:
         pub_dt = item.get("providerPublishTime")
         published_at = datetime.fromtimestamp(pub_dt, tz=timezone.utc) if pub_dt else None
@@ -293,7 +318,17 @@ def fetch_company_news_yfinance(ticker: str, start_date: date, end_date: date, l
         )
 
     articles.sort(key=lambda a: a.published_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-    return _dedupe_articles(articles)[:limit]
+    out = _dedupe_articles(articles)[:limit]
+    logger.info(
+        "yfinance news ticker=%s raw_items=%s returned=%s (window %s..%s, limit=%s)",
+        ticker,
+        len(raw_news),
+        len(out),
+        start_date,
+        end_date,
+        limit,
+    )
+    return out
 
 
 def _parse_rss_articles(
@@ -560,7 +595,9 @@ def fetch_relevant_news(
     except Exception:
         ticker_info = None
 
-    general_query = f"{ticker} stock earnings industry macroeconomy regulation"
+    competitors = top_competitors_for_news_search(ticker, ticker_info)
+    base_terms = [ticker, "stock", "earnings", "industry", "macroeconomy", "regulation"]
+    general_query = " ".join(base_terms + competitors)
 
     workers = max(1, min(settings.news_fetch_parallel_workers, 5))
     with ThreadPoolExecutor(max_workers=workers) as pool:

@@ -24,6 +24,10 @@ class Settings(BaseModel):
     news_llm_batch_size: int = int(os.getenv("NEWS_LLM_BATCH_SIZE", "12"))
     news_llm_timeout_seconds: float = float(os.getenv("NEWS_LLM_TIMEOUT_SECONDS", "45.0"))
     news_llm_max_parallel_chunks: int = int(os.getenv("NEWS_LLM_MAX_PARALLEL", "3"))
+    # One LLM call per ticker to name top competitors; expands NewsAPI/GNews/Exa/Jina query strings.
+    news_competitor_llm_timeout_seconds: float = float(os.getenv("NEWS_COMPETITOR_LLM_TIMEOUT_SECONDS", "20.0"))
+    # Root log level for the app (DEBUG, INFO, WARNING, ERROR, CRITICAL). Applied in app.main on load.
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
 
 settings = Settings()

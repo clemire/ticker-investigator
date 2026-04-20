@@ -131,7 +131,8 @@ def load_dataset_with_spinner(args: argparse.Namespace) -> dict[str, Any]:
 def compact_dataset(dataset: dict[str, Any]) -> dict[str, Any]:
     days = dataset.get("days", [])
     major = dataset.get("major_movements", [])
-    top_major = sorted(major, key=lambda m: abs(m["stock_day"]["pct_change"]), reverse=True)[:12]
+    # Include every major move so the model matches num_major_movements (do not cap here).
+    top_major = sorted(major, key=lambda m: abs(m["stock_day"]["pct_change"]), reverse=True)
 
     compact_major: list[dict[str, Any]] = []
     for movement in top_major:
@@ -174,9 +175,77 @@ def build_system_prompt(dataset_context: dict[str, Any]) -> str:
         "You are a stock movement investigation assistant. "
         "Answer questions only from the provided ticker dataset context. "
         "If information is missing, say what is missing and ask for a refresh with broader filters. "
-        "Be concise but analytical. Quote dates, percentages, and relevant headlines when possible.\n\n"
+        "Be concise but analytical. Quote dates, percentages, and relevant headlines when possible. "
+        "When listing major price movements, include every entry in major_movements exactly once "
+        "(len(major_movements) must equal num_major_movements); do not omit the smallest moves.\n\n"
         f"Ticker dataset context JSON:\n{context_json}"
     )
+
+
+def wants_full_movement_enumeration(question: str) -> bool:
+    """Catalogue-style questions where we must list every move (LLMs often drop one otherwise)."""
+    ql = question.lower()
+    if "movement" not in ql and "moves" not in ql:
+        return False
+    if any(
+        x in ql
+        for x in (
+            "why ",
+            "what caused",
+            "reason for",
+            "because ",
+            "explain ",
+            "cause of",
+        )
+    ):
+        return False
+    catalogue = (
+        "all major",
+        "all price",
+        "every major",
+        "every price",
+        "list all",
+        "list the",
+        "list major",
+        "list every",
+        "show all",
+        "show me the price",
+        "show the price",
+        "complete list",
+        "full list",
+        "all movements",
+        "all moves",
+        "price movements",
+        "major movements",
+        "enumerate",
+        "what are the",
+        "what were the",
+        "give me the",
+    )
+    return any(c in ql for c in catalogue)
+
+
+def format_major_movements_answer(dataset: dict[str, Any]) -> str:
+    """Deterministic full list: same ordering as compact_dataset (|pct_change| desc)."""
+    major = dataset.get("major_movements", [])
+    if not major:
+        return "No major movements in this dataset."
+    ordered = sorted(major, key=lambda m: abs(m["stock_day"]["pct_change"]), reverse=True)
+    lines: list[str] = []
+    for i, m in enumerate(ordered, start=1):
+        d = m["stock_day"]
+        date_s = d["date"]
+        lines.append(
+            f"{i}. **{date_s}**: Close at ${float(d['close']):.2f}, pct change {float(d['pct_change']):+.2f}%"
+        )
+    ticker = dataset.get("ticker", "")
+    start_d = dataset.get("start_date")
+    end_d = dataset.get("end_date")
+    head = (
+        f"The major price movements for {ticker} from {start_d} to {end_d} "
+        f"({len(ordered)} days at or above the threshold):\n\n"
+    )
+    return head + "\n".join(lines)
 
 
 def llm_chat_completion(
@@ -258,6 +327,13 @@ def main() -> int:
                 )
             except Exception as exc:
                 print(f"Reload failed: {exc}", file=sys.stderr)
+            continue
+
+        if wants_full_movement_enumeration(user_input):
+            answer = format_major_movements_answer(dataset)
+            messages.append({"role": "user", "content": user_input})
+            messages.append({"role": "assistant", "content": answer})
+            print(f"\n{answer.strip()}")
             continue
 
         messages.append({"role": "user", "content": user_input})

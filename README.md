@@ -21,9 +21,11 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env: add API keys you plan to use (see below).
+# Edit .env: add API keys you plan to use (see below). Per-article `news_drop_*` lines log at INFO.
 uvicorn app.main:app --reload
 ```
+
+`LOG_LEVEL` in `.env` is applied when the app module loads. You can mirror it for uvicorn’s own logs with e.g. `uvicorn app.main:app --log-level debug`.
 
 API docs: `http://127.0.0.1:8000/docs`
 
@@ -33,6 +35,7 @@ The app loads `.env` automatically (`python-dotenv` via `app/config.py`).
 
 | Variable | Purpose |
 |----------|---------|
+| `LOG_LEVEL` | Root log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (default `INFO`). `news_drop_relevance` / `news_drop_limit` per-article lines use `INFO`. |
 | `DEFAULT_THRESHOLD_PCT` | Default major-move threshold (default `2.0`) |
 | `DEFAULT_NEWS_LIMIT` | Default max related articles per move (default `10`) |
 | `REQUEST_TIMEOUT_SECONDS` | HTTP timeout for upstream news calls |

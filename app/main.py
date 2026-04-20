@@ -1,7 +1,9 @@
 from datetime import date, timedelta
 import logging
+import sys
 
 from fastapi import FastAPI, HTTPException, Query
+from uvicorn.logging import DefaultFormatter
 
 from app.config import settings
 from app.models import ChatRequest, ChatResponse, MovementType, StockNewsResponse
@@ -9,6 +11,31 @@ from app.services.analyzer import build_stock_news_response
 from app.services.chat import answer_question
 
 logger = logging.getLogger(__name__)
+
+
+def configure_logging() -> None:
+    """Apply LOG_LEVEL and match uvicorn's stderr format (see uvicorn.config.LOGGING_CONFIG)."""
+    root = logging.getLogger()
+    name = settings.log_level.strip().upper()
+    level = getattr(logging, name, logging.INFO)
+    root.setLevel(level)
+    # If something else attached handlers before import (e.g. basicConfig), their handler level
+    # can stay at WARNING and block INFO even when root is INFO—reset so root level applies.
+    for h in root.handlers:
+        h.setLevel(logging.NOTSET)
+    if root.handlers:
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(
+        DefaultFormatter(
+            fmt="%(levelprefix)s %(message)s",
+            use_colors=None,
+        )
+    )
+    root.addHandler(handler)
+
+
+configure_logging()
 
 app = FastAPI(
     title="Ticker Investigator API",
