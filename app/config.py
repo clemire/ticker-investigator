@@ -16,6 +16,14 @@ class Settings(BaseModel):
     news_relevance_threshold: float = float(os.getenv("NEWS_RELEVANCE_THRESHOLD", "0.42"))
     # Fetch more raw articles per provider before filtering so enough pass relevance.
     news_fetch_pool_multiplier: int = int(os.getenv("NEWS_FETCH_POOL_MULTIPLIER", "4"))
+    # Concurrent news provider HTTP calls (yfinance + NewsAPI + GNews + Exa + Jina).
+    news_fetch_parallel_workers: int = int(os.getenv("NEWS_FETCH_PARALLEL", "5"))
+    # Batched LLM classification (see app/services/llm_article_classifier.py)
+    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    news_llm_model: str = os.getenv("NEWS_LLM_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+    news_llm_batch_size: int = int(os.getenv("NEWS_LLM_BATCH_SIZE", "12"))
+    news_llm_timeout_seconds: float = float(os.getenv("NEWS_LLM_TIMEOUT_SECONDS", "45.0"))
+    news_llm_max_parallel_chunks: int = int(os.getenv("NEWS_LLM_MAX_PARALLEL", "3"))
 
 
 settings = Settings()

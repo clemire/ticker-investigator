@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import logging
@@ -11,6 +12,10 @@ from dateutil import parser as date_parser
 
 from app.config import settings
 from app.models import NewsArticle
+from app.services.llm_article_classifier import (
+    apply_llm_categories,
+    reconcile_llm_unknown_with_keyword_company,
+)
 
 JINA_NEWS_ENDPOINT = "https://s.jina.ai/http://news.google.com/rss/search"
 NEWSAPI_ENDPOINT = "https://newsapi.org/v2/everything"
@@ -86,6 +91,39 @@ def _ensure_utc(dt: datetime | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+# Shared with `_classify_article` and `_compute_relevance_score` so industry/macro stories
+# without the ticker in the headline still get a relevance boost (otherwise they were dropped).
+_INDUSTRY_KEYWORDS = (
+    "competitor",
+    "competition",
+    "sector",
+    "industry",
+    "market share",
+    "peer",
+    "supply chain",
+)
+_MACRO_KEYWORDS = (
+    "federal reserve",
+    "the fed",
+    "interest rate",
+    "rates decision",
+    "inflation",
+    "geopolitical",
+    "geopolitics",
+    "regulation",
+    "regulatory",
+    "tariff",
+    "sanctions",
+    "election",
+    "congress",
+    "white house",
+    "trade war",
+    "ftc",
+    "antitrust",
+    "subpoena",
+)
+
+
 def _in_date_range(published_at: datetime | None, start_date: date, end_date: date) -> bool:
     if published_at is None:
         return True
@@ -99,48 +137,19 @@ def _classify_article(text: str, ticker: str, info: dict | None = None) -> str:
     company_terms = _build_company_terms(ticker, info)
     if any(term and term in lower for term in company_terms):
         return "company"
-    if any(
-        term in lower
-        for term in (
-            "competitor",
-            "competition",
-            "sector",
-            "industry",
-            "market share",
-            "peer",
-            "supply chain",
-        )
-    ):
+    if any(term in lower for term in _INDUSTRY_KEYWORDS):
         return "industry"
-    if any(
-        term in lower
-        for term in (
-            "federal reserve",
-            "the fed",
-            "interest rate",
-            "rates decision",
-            "inflation",
-            "geopolitical",
-            "geopolitics",
-            "regulation",
-            "regulatory",
-            "tariff",
-            "sanctions",
-            "election",
-            "congress",
-            "white house",
-            "trade war",
-            "ftc",
-            "antitrust",
-            "subpoena",
-        )
-    ):
+    if any(term in lower for term in _MACRO_KEYWORDS):
         return "macro"
     return "unknown"
 
 
 def _compute_relevance_score(text: str, ticker: str, info: dict | None) -> float:
-    """Post-fetch relevance in [0, 1]: overlap with ticker symbol, company name tokens, and common ticker markup."""
+    """Post-fetch relevance in [0, 1]: ticker/company overlap, plus thematic industry/macro signals.
+
+    Without the latter, purely macro or sector stories (no symbol in headline) scored ~0 and were
+    dropped before classification—same keyword lists as `_classify_article` for consistency.
+    """
     t = text.lower()
     sym_l = ticker.strip().lower()
     best = 0.0
@@ -169,6 +178,11 @@ def _compute_relevance_score(text: str, ticker: str, info: dict | None) -> float
         or f"nyse:{sym_l}" in t
     ):
         best = max(best, 0.58)
+    # Keep industry / macro / “competitor context” pieces that never mention the ticker by name.
+    if any(kw in t for kw in _INDUSTRY_KEYWORDS):
+        best = max(best, 0.44)
+    if any(kw in t for kw in _MACRO_KEYWORDS):
+        best = max(best, 0.44)
     return min(best, 1.0)
 
 
@@ -214,7 +228,19 @@ def _finalize_news_with_relevance(
             min_score,
             ticker,
         )
-    return relevant[:limit]
+    sliced = relevant[:limit]
+    sliced = apply_llm_categories(
+        sliced,
+        ticker,
+        info,
+        api_key=os.getenv("OPENAI_API_KEY"),
+        base_url=settings.openai_base_url,
+        model=settings.news_llm_model,
+        batch_size=settings.news_llm_batch_size,
+        timeout=settings.news_llm_timeout_seconds,
+        max_parallel_chunks=settings.news_llm_max_parallel_chunks,
+    )
+    return reconcile_llm_unknown_with_keyword_company(sliced, ticker, info, _classify_article)
 
 
 def _dedupe_articles(articles: list[NewsArticle]) -> list[NewsArticle]:
@@ -534,51 +560,62 @@ def fetch_relevant_news(
     except Exception:
         ticker_info = None
 
-    try:
-        company_news = fetch_company_news_yfinance(ticker, start_date, end_date, limit=pool_size)
-        articles.extend(company_news)
-    except Exception as exc:
-        logger.warning("Company news fetch failed for %s: %s", ticker, exc)
-
     general_query = f"{ticker} stock earnings industry macroeconomy regulation"
-    providers = [
-        lambda: fetch_newsapi_news(
-            general_query,
-            ticker=ticker,
-            info=ticker_info,
-            start_date=start_date,
-            end_date=end_date,
-            limit=pool_size,
-            timeout_seconds=timeout_seconds,
-        ),
-        lambda: fetch_gnews_news(
-            general_query,
-            ticker=ticker,
-            info=ticker_info,
-            start_date=start_date,
-            end_date=end_date,
-            limit=pool_size,
-            timeout_seconds=timeout_seconds,
-        ),
-        lambda: fetch_exa_news(
-            general_query,
-            ticker=ticker,
-            info=ticker_info,
-            start_date=start_date,
-            end_date=end_date,
-            limit=pool_size,
-            timeout_seconds=timeout_seconds,
-        ),
-        lambda: fetch_general_news_jina(general_query, limit=pool_size, timeout_seconds=timeout_seconds),
-    ]
 
-    for provider in providers:
-        try:
-            fetched = provider()
-            articles.extend(fetched)
-        except Exception as exc:
-            logger.warning("News provider fetch failed for %s: %s", ticker, exc)
-            continue
+    workers = max(1, min(settings.news_fetch_parallel_workers, 5))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_name: dict = {
+            pool.submit(
+                fetch_company_news_yfinance,
+                ticker,
+                start_date,
+                end_date,
+                pool_size,
+            ): "yfinance",
+            pool.submit(
+                fetch_newsapi_news,
+                general_query,
+                ticker=ticker,
+                info=ticker_info,
+                start_date=start_date,
+                end_date=end_date,
+                limit=pool_size,
+                timeout_seconds=timeout_seconds,
+            ): "newsapi",
+            pool.submit(
+                fetch_gnews_news,
+                general_query,
+                ticker=ticker,
+                info=ticker_info,
+                start_date=start_date,
+                end_date=end_date,
+                limit=pool_size,
+                timeout_seconds=timeout_seconds,
+            ): "gnews",
+            pool.submit(
+                fetch_exa_news,
+                general_query,
+                ticker=ticker,
+                info=ticker_info,
+                start_date=start_date,
+                end_date=end_date,
+                limit=pool_size,
+                timeout_seconds=timeout_seconds,
+            ): "exa",
+            pool.submit(
+                fetch_general_news_jina,
+                general_query,
+                pool_size,
+                timeout_seconds,
+            ): "jina",
+        }
+        for fut in as_completed(future_to_name):
+            name = future_to_name[fut]
+            try:
+                fetched = fut.result()
+                articles.extend(fetched)
+            except Exception as exc:
+                logger.warning("News provider %s failed for %s: %s", name, ticker, exc)
 
     return _finalize_news_with_relevance(
         articles,

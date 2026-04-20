@@ -1,15 +1,18 @@
 # Ticker Investigator
 
-Mini app that explains major stock price movements using relevant news.
+Mini app that ties **historical stock moves** to **news**, with a small HTTP API and an optional terminal LLM client.
 
-## Features
+## What it does
 
-- Fetches historical stock prices by ticker (via `yfinance`)
-- Detects major daily movements (default: absolute daily move >= 2%)
-- Pulls company and broader news around movement windows
-- Exposes:
-  - `GET /api/v1/stock-news` for stock + movement + related news data
-  - `POST /api/v1/chat` for Q&A against the computed dataset
+- **Prices**: Daily OHLCV by ticker via `yfinance`, with day-over-day % change and configurable “major move” days (default: absolute move ≥ **2%**).
+- **News**: For each major-move day, searches a **±1 day** window and aggregates articles from several backends **in parallel** (thread pool; size `NEWS_FETCH_PARALLEL`, max 5):
+  - **Yahoo Finance** headlines (`yfinance` ticker news)
+  - **NewsAPI** (`everything` search) — requires `NEWSAPI_API_KEY`
+  - **GNews** — requires `GNEWS_API_KEY`
+  - **Exa AI** — requires `EXA_API_KEY`
+  - **Jina AI** (wraps Google News RSS) — no key; used as a fallback
+- **Post-fetch**: Each article gets a **relevance score** (0–1) from (1) ticker/company-name overlap in the text and (2) the same **industry** and **macro** keyword lists used for tagging—so sector- or policy-heavy pieces without the symbol in the headline are not all discarded. Items below `NEWS_RELEVANCE_THRESHOLD` are **dropped**. Results are sorted by score, then capped by `news_limit`.
+- **Tags** (`company` / `industry` / `macro` / `unknown`): After relevance filtering, articles are **re-labeled by a batched LLM** (one JSON response per chunk of up to `NEWS_LLM_BATCH_SIZE` items; chunks can run in parallel). `OPENAI_API_KEY` must be set; set `NEWS_LLM_CLASSIFIER_ENABLED=false` to skip and keep fast keyword labels only. Keyword heuristics still apply when the LLM is off or a chunk fails.
 
 ## Quick start
 
@@ -17,111 +20,78 @@ Mini app that explains major stock price movements using relevant news.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env
+# Edit .env: add API keys you plan to use (see below).
 uvicorn app.main:app --reload
 ```
 
-Open docs at: `http://127.0.0.1:8000/docs`
+API docs: `http://127.0.0.1:8000/docs`
 
-### Environment config (`.env`)
+## Environment (`.env`)
 
-The app auto-loads environment variables from `.env`.
+The app loads `.env` automatically (`python-dotenv` via `app/config.py`).
 
-```bash
-cp .env.example .env
-```
+| Variable | Purpose |
+|----------|---------|
+| `DEFAULT_THRESHOLD_PCT` | Default major-move threshold (default `2.0`) |
+| `DEFAULT_NEWS_LIMIT` | Default max related articles per move (default `10`) |
+| `REQUEST_TIMEOUT_SECONDS` | HTTP timeout for upstream news calls |
+| `UPSTREAM_RETRY_ATTEMPTS` | Retries when `yfinance` price history is empty |
+| `UPSTREAM_RETRY_BACKOFF_SECONDS` | Backoff between price retries |
+| `NEWS_RELEVANCE_THRESHOLD` | Min relevance score 0–1 to keep an article (default `0.42`) |
+| `NEWS_FETCH_POOL_MULTIPLIER` | Raw fetch size per source ≈ `news_limit × multiplier` before filtering (default `4`) |
+| `NEWS_FETCH_PARALLEL` | Thread pool size for parallel provider calls (default `5`, capped at 5 sources) |
+| `NEWSAPI_API_KEY` | NewsAPI |
+| `GNEWS_API_KEY` | GNews |
+| `EXA_API_KEY` | Exa |
+| `OPENAI_API_KEY` | **Required** for LLM article classification (and for `chat_cli.py`) |
+| `OPENAI_MODEL` | Default model name (CLI); classification uses `NEWS_LLM_MODEL` if set |
+| `OPENAI_BASE_URL` | OpenAI-compatible API base (default official OpenAI) |
+| `NEWS_LLM_CLASSIFIER_ENABLED` | `true`/`false`; default on when `OPENAI_API_KEY` is set |
+| `NEWS_LLM_MODEL` | Model for batched classification (default `gpt-4o-mini`) |
+| `NEWS_LLM_BATCH_SIZE` | Articles per LLM request (default `12`) |
+| `NEWS_LLM_TIMEOUT_SECONDS` | Per-request timeout (default `45`) |
+| `NEWS_LLM_MAX_PARALLEL` | Parallel chunk workers when a batch splits (default `3`) |
 
-Then fill keys in `.env`:
-
-- `NEWSAPI_API_KEY`
-- `GNEWS_API_KEY`
-- `EXA_API_KEY`
-- `OPENAI_API_KEY` (for `chat_cli.py`)
-- Optional resilience tuning:
-  - `UPSTREAM_RETRY_ATTEMPTS`
-  - `UPSTREAM_RETRY_BACKOFF_SECONDS`
+Missing keys are skipped; Jina and `yfinance` can still contribute. Provider failures are logged and do not fail the whole request.
 
 ## API
 
 ### `GET /api/v1/stock-news`
 
-Query params:
+Returns daily rows, major-move days, and **`related_news`** per major day.
 
-- `ticker` (required), e.g. `AAPL`
-- `start_date` (optional, `YYYY-MM-DD`, default `end_date-90d`)
-- `end_date` (optional, default `today`)
-- `threshold_pct` (optional, default `2.0`)
-- `movement_type` (optional: `up`, `down`, `all`; default `all`)
-- `news_limit` (optional, default `10`, max `50`)
+Query parameters:
 
-Example:
+- `ticker` (required)
+- `start_date`, `end_date` (optional; default window is last **90** days ending `today`)
+- `threshold_pct`, `movement_type` (`up` | `down` | `all`), `news_limit` (1–50)
 
-```bash
-curl "http://127.0.0.1:8000/api/v1/stock-news?ticker=AAPL&threshold_pct=2&movement_type=all&news_limit=8"
-```
+Each news item includes at least: `title`, `source`, `url`, `published_at`, `description`, `category`, **`relevance_score`**.
 
 ### `POST /api/v1/chat`
 
-Body:
+Rule-based Q&A over the **same** stock+news payload built for the given ticker and dates (no external LLM). Useful for quick probes from `curl` or scripts.
 
-```json
-{
-  "ticker": "AAPL",
-  "question": "Why did the stock move the most in this period?",
-  "start_date": "2025-01-01",
-  "end_date": "2025-03-31",
-  "threshold_pct": 2.0,
-  "movement_type": "all",
-  "news_limit": 10
-}
-```
+### `GET /health`
 
-Example:
+Liveness check.
+
+## Terminal LLM chat (`chat_cli.py`)
+
+Uses an **OpenAI-compatible** chat API to answer questions against the JSON from `GET /api/v1/stock-news` (your API must be running).
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/api/v1/chat" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "ticker": "AAPL",
-    "question": "What was the biggest move and why?"
-  }'
-```
-
-## Notes
-
-- News coverage quality depends on external provider availability.
-- The chat endpoint is retrieval-style and deterministic (no paid LLM required).
-- News collection now uses these providers: `NewsAPI`, `GNews`, `Jina AI`, `Exa AI`.
-- Optional API keys (recommended): `NEWSAPI_API_KEY`, `GNEWS_API_KEY`, `EXA_API_KEY`.
-- If a provider fails or has no key configured, the API continues with remaining sources.
-
-## Terminal LLM Chat
-
-Use the terminal client when you want arbitrary natural-language investigation over a ticker dataset.
-
-1) Start the API:
-
-```bash
-uvicorn app.main:app --reload
-```
-
-2) Set `OPENAI_API_KEY` in `.env` (or export it manually).
-
-3) Start interactive chat:
-
-```bash
+export OPENAI_API_KEY=...   # or set in .env
 python chat_cli.py --ticker AAPL
 ```
 
-Optional flags:
+Common flags: `--start-date`, `--end-date`, `--threshold-pct`, `--movement-type`, `--news-limit`, `--api-base-url`, `--llm-model`, `--llm-base-url`, `--timeout`, `--api-retries`.
 
-- `--start-date 2025-01-01 --end-date 2025-03-31`
-- `--threshold-pct 2.0 --movement-type all --news-limit 10`
-- `--llm-model gpt-4o-mini`
-- `--llm-base-url https://api.openai.com/v1` (or any OpenAI-compatible endpoint)
-- `--llm-api-key-env OPENAI_API_KEY`
+In the REPL: `:reload` refetches data; `:quit` exits. A short loading line appears on stderr while the dataset loads.
 
-In-session commands:
+## Notes
 
-- `:help` show commands
-- `:reload` refresh ticker data from API
-- `:quit` exit
+- **Relevance** blends direct ticker/company overlap with industry/macro keyword matches (aligned with classification). Tune `NEWS_RELEVANCE_THRESHOLD` if you see too many drops or too much noise (raising it above ~0.45 can drop thematic-only articles again).
+- **Classification** uses the LLM when enabled; otherwise the same keyword rules as before. Results are cached in-process by URL+title hash to avoid repeat API cost.
+- Price history can occasionally be empty from `yfinance`; the API retries before returning 404.
