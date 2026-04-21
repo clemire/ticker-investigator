@@ -35,7 +35,7 @@ The app loads `.env` automatically (`python-dotenv` via `app/config.py`).
 
 | Variable | Purpose |
 |----------|---------|
-    | `LOG_LEVEL` | Root log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (default `INFO`.) |
+| `LOG_LEVEL` | Root log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (default `INFO`.) |
 | `DEFAULT_THRESHOLD_PCT` | Default major-move threshold (default `2.0`) |
 | `DEFAULT_NEWS_LIMIT` | Default max related articles per move (default `10`) |
 | `REQUEST_TIMEOUT_SECONDS` | HTTP timeout for upstream news calls |
