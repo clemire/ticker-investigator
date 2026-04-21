@@ -14,7 +14,7 @@ Mini app that ties **historical stock moves** to **news**, with a small HTTP API
 - **Post-fetch**: Each article gets a **relevance score** (0–1) from (1) ticker/company-name overlap in the text and (2) the same **industry** and **macro** keyword lists used for tagging—so sector- or policy-heavy pieces without the symbol in the headline are not all discarded. Items below `NEWS_RELEVANCE_THRESHOLD` are **dropped**. Results are sorted by score, then capped by `news_limit`.
 - **Tags** (`company` / `industry` / `macro` / `unknown`): After relevance filtering, articles are **re-labeled by a batched LLM** (one JSON response per chunk of up to `NEWS_LLM_BATCH_SIZE` items; chunks can run in parallel). `OPENAI_API_KEY` must be set; set `NEWS_LLM_CLASSIFIER_ENABLED=false` to skip and keep fast keyword labels only. Keyword heuristics still apply when the LLM is off or a chunk fails.
 
-## Quick start
+## Getting Started
 
 ```bash
 python3 -m venv .venv
